@@ -1,6 +1,350 @@
 #!/usr/bin/python
 
-def debug(s):
-  d = True
-  if d:
-    print s
+class HistoryQueue(object):
+  def __init__(self):
+    self.list = []
+  def push(self,item):
+    self.list.insert(0,item)
+  def pop(self):
+    return self.list.pop()
+  def peek(self):
+    return self.list[-1]
+  def isEmpty(self):
+    return len(self.list) == 0
+
+class History(object):
+  def __init__(self,limit,iterator=None):
+    self.limit = limit
+    self.items = []
+    if iterator is not None:
+      for val in iterator:
+        self.record(val)
+  def record(self,obj):
+    self.items.append(obj)
+    if len(self.items) > self.limit:
+      self.items = self.items[1:]
+  def __iter__(self):
+    """go back in time"""
+    for item in self.items:
+      yield item
+  def reversed(self):
+    """per request by one bejnamin button"""
+    for item in reversed(self.items):
+      yield item
+  def __getitem__(self,idx):
+    """energize the flux capacitor"""
+    return self.items[idx]
+  def __len__(self):
+    return len(self.items)
+  def __getslice__(self,i,j):
+    return self.items[i:j]
+  def clear(self):
+    """Burn the library at Alexandria, why don't you"""
+    self.items = []
+
+class KeyboardEvent(object):
+  def __init__(self,s):
+    self.s == s
+
+import sys
+import os.path
+import posix
+import pwd
+import termios
+import curses
+import curses.ascii
+import threading
+import Queue
+
+events = Queue.Queue(-1)
+
+progname = os.path.basename(sys.argv[0])
+myname = pwd.getpwuid(posix.getuid())[0]
+myhome = pwd.getpwuid(posix.getuid())[5]
+
+stdscr = None
+input_window = None
+display_window = None
+status_bar = None
+screen_width  = 0
+need_window_regeneration = False
+
+buf           = ""
+point         = 0
+mark          = None
+kill_ring     = HistoryQueue()
+display_index = 0
+
+received = History(1000)
+
+history = []
+max_history = 10
+history_index = 0
+
+VDSUSP = None
+import platform
+if platform.system() == 'Darwin':
+  #mac
+  VDSUSP = 11
+  _POSIX_VDISABLE = '\xFF'
+elif platform.system() == 'SunOS':
+  VDSUSP = 11
+  _POSIX_VDISABLE = '\x00'
+elif platform.system() == 'Linux':
+  #no DSUSP
+  _POSIX_VDISABLE = '\x00'
+else:
+  #Guess
+  _POSIX_VDISABLE = '\xFF'
+
+
+def main():
+  global need_window_regeneration
+  import time
+  import signal
+  signal.signal(signal.SIGWINCH,winch_handler)
+  s = None
+  while s != '/quit':
+    time.sleep(.1)
+    if need_window_regeneration:
+      regenerate_windows()
+      #refresh_display_window()
+      need_window_regeneration = False
+    
+    s = maybe_get_input()
+    refresh_input_window()
+    if s is not None:
+      #we're gonna move the cursor to update the display, so hide it
+      #curses.curs_set(0)
+      add_to_display(s)
+  curses_shutdown()
+
+def add_to_display(s):
+  """add a string to the display window"""
+  received.record(s)
+  refresh_display_window()
+
+def maybe_get_input():
+  """maybe_get_input()->string, or None
+
+reads from the tty. If the user has entered a complete line, return it.
+Otherwise, return None. This function handles updating the display of the
+input box appropriately."""
+  while True:
+    key = input_window.getch()
+    if key==27: #escape
+      key = input_window.getch()
+      nextkey = input_window.getch()
+      if key != 91 or nextkey == -1:
+        continue #this sequence is stupid!
+      nextkey = chr(nextkey) #let's use symbolic chars
+      if nextkey == 'A':
+        key = curses.KEY_UP
+      elif nextkey == 'B':
+        key = curses.KEY_DOWN
+      elif nextkey == 'C':
+        key = curses.KEY_RIGHT
+      elif nextkey == 'D':
+        key = curses.KEY_LEFT
+      elif nextkey == 'F':
+        key = curses.KEY_END
+      elif nextkey == 'G':
+        key = curses.KEY_NPAGE
+      elif nextkey == 'H':
+        key = curses.KEY_HOME
+      elif nextkey == 'I':
+        key = curses.KEY_PPAGE
+      elif nextkey == 'L':
+        key = curses.KEY_IC
+      else:
+        continue # man, screw this character
+    if key == -1:
+      return
+    s = handle_key(key)
+    if s is not None:
+      return s
+
+def refresh_input_window():
+  global display_index
+  if point < display_index:
+    #need to move left
+    while point < display_index:
+      display_index -= screen_width / 4 * 3
+    if display_index < 0:
+      #too tired to figure out if this can ever happen
+      display_index = 0
+  if point > display_index + screen_width - 1:
+    #need to move right
+    while point > display_index + screen_width - 1:
+      display_index += screen_width / 4 * 3
+  end_index = min(display_index + screen_width - 1,len(buf))
+  to_display = buf[display_index:end_index]
+  input_window.addstr(0,0,to_display)
+  input_window.clrtoeol()
+  move_cursor_to_point()
+  input_window.refresh()
+
+def refresh_display_window():
+  display_window.clear()
+  maxy,maxx = display_window.getmaxyx()
+  if len(received) > maxy:
+    selection = received[-maxy:]
+  else:
+    selection = received
+  for thing in selection:
+    display_window.scroll()
+    display_window.addstr(maxy-1,0,thing)
+  display_window.refresh()
+
+def move_cursor_to_point():
+  #how much are we missing?
+  input_window.move(0,point - display_index)
+
+def handle_key(key):
+  global buf,point,mark
+  s = None
+  if key in [13,10,curses.KEY_ENTER]: #\r,\n,Enter
+    s = buf
+    buf = ""
+    point = mark = 0
+  elif key in [0x08,0x7F,curses.KEY_BACKSPACE]: # ^H, delete, backspace
+    if point > 0:
+      point-=1
+      buf = buf[:point] + buf[point+1:]
+      mark = None
+    else:
+      curses.beep()
+  elif key in [0x04,curses.KEY_DC]: #^D or DEL
+    if point < len(buf):
+      buf = buf[:point] + buf[point+1:]
+      mark = None
+    else:
+      curses.beep()
+  elif key in [0x06,curses.KEY_RIGHT]: #^B or right
+    if point < len(buf):
+      point+=1
+    else:
+      curses.beep()
+  elif key in [0x02,curses.KEY_LEFT]: #^F or left
+    if point > 0:
+      point-=1
+    else:
+      curses.beep()
+  elif key in [0x0]: # ^  (i.e., ctrl+space: drop mark)
+    mark = point
+  elif key in [0x17]: # ^w
+    if mark is None or point == mark:
+      pass
+    else:
+      low = min(point,mark)
+      high = max(point,mark)
+      region = buf[low:high]
+      kill_ring.push(region)
+      buf = buf[:low]+buf[high:]
+      mark = None
+      point = low
+  elif key in [ord(curses.ascii.ctrl('y'))]: #^y :yank
+    if kill_ring.isEmpty():
+      curses.beep()
+    else:
+      yanked = kill_ring.peek()
+      buf = buf[:point] + yanked + buf[point:]
+      point += len(yanked)
+  elif key in [ord(curses.ascii.ctrl('k'))]: # kill to end of line
+    mark = None
+    kill_ring.push(buf[point:])
+    buf = buf[:point]
+  elif key in [ord(curses.ascii.ctrl('p')),curses.KEY_UP]: # prev line
+    curses.beep()
+  elif key in [ord(curses.ascii.ctrl('n')),curses.KEY_DOWN]: # next line
+    curses.beep()
+  elif key in [ord(curses.ascii.ctrl('a')),curses.KEY_HOME,curses.KEY_FIND]:
+    point = 0
+  elif key in [ord(curses.ascii.ctrl('e')),curses.KEY_END]:
+    point = len(buf)
+  else: #something else
+    if key < 32 or key > 126:
+      return
+    mark = None
+    buf = buf[:point] + chr(key)+ buf[point:]
+    point += 1
+  return s
+
+def winch_handler(signum,frame):
+  global need_window_regeneration
+  need_window_regeneration = True
+
+def generate_windows():
+  global display_window,input_window,status_bar,screen_width
+  maxy,maxx = stdscr.getmaxyx()
+  screen_width = maxx
+  
+  display_window = stdscr.subwin(maxy-2,maxx,0,0)
+  display_window.idlok(1)
+  display_window.scrollok(True)
+  display_window.leaveok(1)
+  display_window.refresh()
+  
+  status_bar = stdscr.subwin(1,maxx,maxy-2,0)
+  status_bar.attron(curses.A_REVERSE)
+  status_bar.hline(0,0,'-',maxx)
+  status_bar.refresh()
+  
+  input_window   = stdscr.subwin(1,maxx,maxy-1,0)
+  input_window.nodelay(True)
+  input_window.clear()
+  input_window.refresh()
+
+def regenerate_windows():
+  global display_window,input_window,status_bar,screen_width
+  import fcntl
+  import struct
+  s = struct.pack("HHHH",0,0,0,0)
+  x = fcntl.ioctl(sys.stdout.fileno(),termios.TIOCGWINSZ,s)
+  rows,cols,pixhi,pixwide = struct.unpack('HHHH',x)
+  curses.resizeterm(rows,cols)
+  maxy,maxx = stdscr.getmaxyx()
+  screen_width = maxx
+  
+  display_window.resize(maxy-2,maxx)
+  display_window.refresh()
+  
+  status_bar.mvwin(maxy-2,0)
+  status_bar.hline(0,0,'-',maxx)
+  status_bar.refresh()
+  
+  input_window.mvwin(maxy-1,0)
+  input_window.resize(1,maxx)
+  input_window.clear()
+  input_window.refresh()
+  
+  refresh_display_window()
+
+
+def curses_startup():
+  global stdscr,display_window,input_window,input_box,screen_width
+  new = termios.tcgetattr(sys.stdin)
+  if VDSUSP is not None:
+    new[-1][VDSUSP] = _POSIX_VDISABLE
+  new[-1][termios.VSTOP] = _POSIX_VDISABLE
+  termios.tcsetattr(sys.stdin,termios.TCSANOW,new)
+  stdscr = curses.initscr()
+  curses.noecho()
+  curses.cbreak()
+  stdscr.keypad(1)
+  generate_windows()
+
+def curses_shutdown():
+  curses.nocbreak()
+  stdscr.keypad(0)
+  curses.echo()
+  curses.endwin()
+
+if __name__ == '__main__':
+  try:
+    old = termios.tcgetattr(sys.stdin)
+    curses_startup()
+    main()
+  finally:
+    termios.tcsetattr(sys.stdin,termios.TCSANOW,old)
+    curses_shutdown()
