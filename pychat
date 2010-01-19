@@ -57,9 +57,6 @@ class History(object):
     """Burn the library at Alexandria, why don't you"""
     self.items = []
 
-class InvalidCommandException(BaseException):
-  pass
-
 class KeyEvent(object):
   def __init__(self,ch):
     assert type(ch) is int
@@ -159,7 +156,7 @@ def keyboard_read_loop():
           #only if we get a valid char. Ignore weird escape sequences
           events.put(KeyEvent(key))
     except select.error as e:
-      debug("Got a select.error %s, but we handled it" % e)
+      pass
 
 def read_key():
   key = ord(sys.stdin.read(1))
@@ -216,14 +213,13 @@ def event_handle_loop():
       input_window.refresh()
     if isinstance(e,KeyEvent):
       s = handle_key(e.ch)
-      try:
-        if s is not None:
-          if s[0] == '/':
-            handle_command(s)
-          else:
-            send_to_all("<%s> %s" % (options.name,s))
-      except BaseException as e:
-        debug("got a %s: %s" % (type(e),e))
+      if s is not None:
+        if len(s) == 0:
+          inform("Gimme something to work with here!")
+        elif s[0] == '/':
+          handle_command(s)
+        else:
+          send_to_all("<%s> %s" % (options.name,s))
       refresh_input_window()
   quitting = True
 
@@ -231,7 +227,12 @@ def handle_command(cmdstr):
   command = cmdstr[1:cmdstr.index(' ')] if ' ' in cmdstr else cmdstr[1:]
   argstr  = cmdstr[cmdstr.index(' '):].strip() if ' ' in cmdstr else ''
   commands = {
-    'quit': do_quit,
+    'quit'    : do_quit,
+    'me'      : do_action,
+    'msg'     : do_msg,
+    'm'       : do_msg,
+    'pipe'    : do_pipe,
+    'we'      : do_we,
   }
   if command in commands:
     commands[command](argstr)
@@ -243,10 +244,49 @@ def do_quit(argstr):
   send_to_all('## %s left the chat (%s).' % (options.name,argstr))
   quitting = True
 
+def do_action(argstr):
+  send_to_all('(*) %s %s' % (options.name,argstr))
+
+def do_msg(argstr):
+  tokens = argstr.split()
+  if len(tokens) < 2:
+    inform("Need recipient list and message")
+    return
+  recipients = tokens[0].split(',')
+  message = argstr[argstr.index(' '):].strip()
+  any_found = False
+  for recipient in recipients:
+    if send_to_one(recipient,'%%%s->%s%% %s\n' %(options.name,tokens[0],message)):
+      any_found = True
+  if not any_found:
+    inform("Need recipient list")
+  else:
+    send_to_one(options.name,'%%%s->%s%% %s\n' %(options.name,tokens[0],message))
+
+def do_pipe(argstr):
+  import subprocess
+  pipeline = subprocess.Popen(argstr,shell=True,stdout=subprocess.PIPE)
+  for line in pipeline.stdout:
+    send_to_all('<%s> %s'%(options.name,line))
+
+def do_we(argstr):
+  people = []
+  for filename in os.listdir(sockdir):
+    stat_result = os.stat(os.path.join(sockdir,filename))
+    if not stat.S_ISSOCK(stat_result.st_mode):
+      continue
+    people.append(filename)
+  msg = '(*) '
+  for person in people[:-1]:
+    msg += person +', '
+  msg += 'and ' + people[-1]
+  msg += ' '+argstr
+  send_to_all(msg)
+  
 def receive_loop():
   server_sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
   server_sock.bind(sockname)
-  server_sock.listen(5)
+  server_sock.listen(100)
   server_sock.setblocking(0)
   ready_semaphore.release()
   while not quitting:
@@ -259,11 +299,9 @@ def receive_loop():
       if line[-1] == '\n':
         line = line[:-1]
       if not options.spartan:
-        localtime = time.localtime()
-        line = ("[%d:%d] " % (localtime.tm_hour,localtime.tm_min))+line
+        line = time.strftime("[%H:%M] ")+line
       events.put(RecvEvent(line))
     conn.close()
-    
   if os.path.exists(sockname):
     os.unlink(sockname)
 
@@ -271,20 +309,38 @@ def send_to_all(s):
   if s[-1] != '\n':
     s += '\n'
   for filename in os.listdir(sockdir):
-    debug(filename)
     stat_result = os.stat(os.path.join(sockdir,filename))
     if not stat.S_ISSOCK(stat_result.st_mode):
       continue
+    try:
+      sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+      sock.connect(os.path.join(sockdir,filename))
+      sock.send(s)
+      sock.close()
+    except socket.error as e:
+      inform("failed to send message %s to %s: %s" % (s,filename,e))
+
+def send_to_one(user,s):
+  path = os.path.join(sockdir,user)
+  if not (os.path.exists(path) and stat.S_ISSOCK(os.stat(path).st_mode)):
+    inform("%s isn't here" % user)
+    return False
+  try:
     sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-    sock.connect(os.path.join(sockdir,filename))
+    sock.connect(path)
     sock.send(s)
     sock.close()
+  except socket.error as e:
+    inform("failed to send message %s to %s" % (s,user))
+    return False
+  return True
 
 def main():
   global need_window_regeneration,quitting,options
   import time
   import signal
   signal.signal(signal.SIGWINCH,winch_handler)
+  signal.signal(signal.SIGTERM,term_handler)
   if not os.path.exists(sockdir):
     os.mkdir(sockdir)
   keyboard_thread = threading.Thread(target=keyboard_read_loop)
@@ -423,6 +479,10 @@ def winch_handler(signum,frame):
   global need_window_regeneration
   need_window_regeneration = True
 
+def term_handler(signum,frame):
+  send_to_all('## %s left the chat (caught SIGTERM).' % options.name)
+  sys.exit(1)
+
 def generate_windows():
   global display_window,input_window,status_bar,screen_width
   maxy,maxx = stdscr.getmaxyx()
@@ -476,6 +536,7 @@ def curses_startup():
   if VDSUSP is not None:
     new[-1][VDSUSP] = _POSIX_VDISABLE
   new[-1][termios.VSTOP] = _POSIX_VDISABLE
+  new[-1][termios.VINTR] = _POSIX_VDISABLE
   termios.tcsetattr(sys.stdin,termios.TCSANOW,new)
   stdscr = curses.initscr()
   curses.noecho()
@@ -490,7 +551,10 @@ def curses_shutdown():
   curses.endwin()
 
 if __name__ == '__main__':
-  sys.stderr = open('/Users/conorh/stderr')
+  if os.path.exists(sockname):
+    print >> sys.stderr, "Can't start pychat: socket %s exists" % sockname
+    print >> sys.stderr, "(You probably have pychat or hoserchat running; kill them)"
+    sys.exit(1)
   try:
     old = termios.tcgetattr(sys.stdin)
     curses_startup()
