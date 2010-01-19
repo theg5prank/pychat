@@ -1,5 +1,20 @@
 #!/usr/bin/python
 
+import sys
+import os.path
+import posix
+import pwd
+import termios
+import curses
+import curses.ascii
+import threading
+import Queue
+import select
+import socket
+import time
+import optparse
+import stat
+
 class HistoryQueue(object):
   def __init__(self):
     self.list = []
@@ -42,25 +57,53 @@ class History(object):
     """Burn the library at Alexandria, why don't you"""
     self.items = []
 
-class KeyboardEvent(object):
+class InvalidCommandException(BaseException):
+  pass
+
+class KeyEvent(object):
+  def __init__(self,ch):
+    assert type(ch) is int
+    self.ch = ch
+
+class WinchEvent(object):
+  pass
+
+class RecvEvent(object):
   def __init__(self,s):
-    self.s == s
+    self.s = s
 
-import sys
-import os.path
-import posix
-import pwd
-import termios
-import curses
-import curses.ascii
-import threading
-import Queue
+parser = optparse.OptionParser()
+parser.add_option('-n','--name',dest="name",type="string",
+                  default=pwd.getpwuid(posix.getuid())[0],
+                  help="use an alternate name")
+parser.add_option('-c','--chattype',dest="chattype",type="string",
+                  default="electionchat",#os.path.basename(sys.argv[0]),
+                  help="Select chat type (electionchat, hoserchat, etc)")
+parser.add_option('-s','--spartan',dest="spartan",
+                  action="store_true",default=False,
+                  help="Spartan mode. Don't display timestamps, etc.")
 
-events = Queue.Queue(-1)
+options,args = parser.parse_args()
+if len(args) != 0:
+  parser.error("Unable to parse all command line options")
+
 
 progname = os.path.basename(sys.argv[0])
-myname = pwd.getpwuid(posix.getuid())[0]
 myhome = pwd.getpwuid(posix.getuid())[5]
+sockdir  = '/tmp/.'+options.chattype
+sockname = sockdir + '/'+options.name
+
+def debug(s):
+  pipename = myhome+'/.pychatdbg'
+  if not os.path.exists(pipename):
+    return
+  try:
+    pipe = open(pipename,'w')
+    if select.select([],[pipe],[],0)[1] is not []:
+      print >> pipe, s
+    pipe.close()
+  except IOError:
+    pass
 
 stdscr = None
 input_window = None
@@ -81,6 +124,9 @@ history = []
 max_history = 10
 history_index = 0
 
+
+events = Queue.Queue(-1)
+
 VDSUSP = None
 import platform
 if platform.system() == 'Darwin':
@@ -97,72 +143,175 @@ else:
   #Guess
   _POSIX_VDISABLE = '\xFF'
 
+quitting = False
+
+ready_semaphore = threading.Semaphore(0)
+
+def inform(s):
+  add_to_display('pychat: %s' % s)
+
+def keyboard_read_loop():
+  while not quitting:
+    try:
+      if len(select.select([sys.stdin],[],[],.1)[0]) == 1:
+        key = read_key()
+        if key is not None:
+          #only if we get a valid char. Ignore weird escape sequences
+          events.put(KeyEvent(key))
+    except select.error as e:
+      debug("Got a select.error %s, but we handled it" % e)
+
+def read_key():
+  key = ord(sys.stdin.read(1))
+  if key==27: #escape
+    key = ord(sys.stdin.read(1))
+    nextkey = ord(sys.stdin.read(1))
+    if key != 91 or nextkey == -1:
+      return None #this sequence is stupid!
+    nextkey = chr(nextkey) #let's use symbolic chars
+    if nextkey == 'A':
+      key = curses.KEY_UP
+    elif nextkey == 'B':
+      key = curses.KEY_DOWN
+    elif nextkey == 'C':
+      key = curses.KEY_RIGHT
+    elif nextkey == 'D':
+      key = curses.KEY_LEFT
+    elif nextkey == 'F':
+      key = curses.KEY_END
+    elif nextkey == 'G':
+      key = curses.KEY_NPAGE
+    elif nextkey == 'H':
+      key = curses.KEY_HOME
+    elif nextkey == 'I':
+      key = curses.KEY_PPAGE
+    elif nextkey == 'L':
+      key = curses.KEY_IC
+    else:
+      return None # man, screw this character
+  return key
+
+def winch_listen_loop():
+  """Can't put the event in the queue from the signal handler, 
+unfortunately, so this is a kludge"""
+  global need_window_regeneration
+  import time
+  while not quitting:
+    time.sleep(.2)
+    if need_window_regeneration:
+      events.put(WinchEvent())
+      need_window_regeneration = False
+
+def event_handle_loop():
+  global quitting
+  s = None
+  while not quitting:
+    e = events.get()
+    if isinstance(e,WinchEvent):
+      regenerate_windows()
+      refresh_input_window()
+    if isinstance(e,RecvEvent):
+      add_to_display(e.s)
+      move_cursor_to_point()
+      input_window.refresh()
+    if isinstance(e,KeyEvent):
+      s = handle_key(e.ch)
+      try:
+        if s is not None:
+          if s[0] == '/':
+            handle_command(s)
+          else:
+            send_to_all("<%s> %s" % (options.name,s))
+      except BaseException as e:
+        debug("got a %s: %s" % (type(e),e))
+      refresh_input_window()
+  quitting = True
+
+def handle_command(cmdstr):
+  command = cmdstr[1:cmdstr.index(' ')] if ' ' in cmdstr else cmdstr[1:]
+  argstr  = cmdstr[cmdstr.index(' '):].strip() if ' ' in cmdstr else ''
+  commands = {
+    'quit': do_quit,
+  }
+  if command in commands:
+    commands[command](argstr)
+  else:
+    inform('Unknown command "%s"' % command)
+
+def do_quit(argstr):
+  global quitting
+  send_to_all('## %s left the chat (%s).' % (options.name,argstr))
+  quitting = True
+
+def receive_loop():
+  server_sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+  server_sock.bind(sockname)
+  server_sock.listen(5)
+  server_sock.setblocking(0)
+  ready_semaphore.release()
+  while not quitting:
+    try:
+      conn,addr = server_sock.accept()
+    except socket.error as e:
+      time.sleep(.1)
+      continue
+    for line in conn.makefile():
+      if line[-1] == '\n':
+        line = line[:-1]
+      if not options.spartan:
+        localtime = time.localtime()
+        line = ("[%d:%d] " % (localtime.tm_hour,localtime.tm_min))+line
+      events.put(RecvEvent(line))
+    conn.close()
+    
+  if os.path.exists(sockname):
+    os.unlink(sockname)
+
+def send_to_all(s):
+  if s[-1] != '\n':
+    s += '\n'
+  for filename in os.listdir(sockdir):
+    debug(filename)
+    stat_result = os.stat(os.path.join(sockdir,filename))
+    if not stat.S_ISSOCK(stat_result.st_mode):
+      continue
+    sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+    sock.connect(os.path.join(sockdir,filename))
+    sock.send(s)
+    sock.close()
 
 def main():
-  global need_window_regeneration
+  global need_window_regeneration,quitting,options
   import time
   import signal
   signal.signal(signal.SIGWINCH,winch_handler)
-  s = None
-  while s != '/quit':
+  if not os.path.exists(sockdir):
+    os.mkdir(sockdir)
+  keyboard_thread = threading.Thread(target=keyboard_read_loop)
+  keyboard_thread.start()
+  winch_listener_thread = threading.Thread(target=winch_listen_loop)
+  winch_listener_thread.start()
+  event_handling_thread = threading.Thread(target=event_handle_loop)
+  event_handling_thread.start()
+  receiver_thread = threading.Thread(target=receive_loop)
+  receiver_thread.start()
+  #wait for receiver thread to create our socket so we see the following output
+  ready_semaphore.acquire()
+  inform('joining %s as "%s"' % (options.chattype,options.name))
+  send_to_all('## %s joined the chat.' % options.name)
+  while not quitting:
     time.sleep(.1)
-    if need_window_regeneration:
-      regenerate_windows()
-      #refresh_display_window()
-      need_window_regeneration = False
-    
-    s = maybe_get_input()
-    refresh_input_window()
-    if s is not None:
-      #we're gonna move the cursor to update the display, so hide it
-      #curses.curs_set(0)
-      add_to_display(s)
+  keyboard_thread.join()
+  winch_listener_thread.join()
+  event_handling_thread.join()
+  keyboard_thread.join()
+  receiver_thread.join()
   curses_shutdown()
 
 def add_to_display(s):
   """add a string to the display window"""
   received.record(s)
   refresh_display_window()
-
-def maybe_get_input():
-  """maybe_get_input()->string, or None
-
-reads from the tty. If the user has entered a complete line, return it.
-Otherwise, return None. This function handles updating the display of the
-input box appropriately."""
-  while True:
-    key = input_window.getch()
-    if key==27: #escape
-      key = input_window.getch()
-      nextkey = input_window.getch()
-      if key != 91 or nextkey == -1:
-        continue #this sequence is stupid!
-      nextkey = chr(nextkey) #let's use symbolic chars
-      if nextkey == 'A':
-        key = curses.KEY_UP
-      elif nextkey == 'B':
-        key = curses.KEY_DOWN
-      elif nextkey == 'C':
-        key = curses.KEY_RIGHT
-      elif nextkey == 'D':
-        key = curses.KEY_LEFT
-      elif nextkey == 'F':
-        key = curses.KEY_END
-      elif nextkey == 'G':
-        key = curses.KEY_NPAGE
-      elif nextkey == 'H':
-        key = curses.KEY_HOME
-      elif nextkey == 'I':
-        key = curses.KEY_PPAGE
-      elif nextkey == 'L':
-        key = curses.KEY_IC
-      else:
-        continue # man, screw this character
-    if key == -1:
-      return
-    s = handle_key(key)
-    if s is not None:
-      return s
 
 def refresh_input_window():
   global display_index
@@ -341,6 +490,7 @@ def curses_shutdown():
   curses.endwin()
 
 if __name__ == '__main__':
+  sys.stderr = open('/Users/conorh/stderr')
   try:
     old = termios.tcgetattr(sys.stdin)
     curses_startup()
@@ -348,3 +498,6 @@ if __name__ == '__main__':
   finally:
     termios.tcsetattr(sys.stdin,termios.TCSANOW,old)
     curses_shutdown()
+    quitting = True
+    if os.path.exists(sockname):
+      os.unlink(sockname)
