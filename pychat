@@ -91,6 +91,7 @@ sockdir  = '/tmp/.'+options.chattype
 sockname = sockdir + '/'+options.name
 
 def debug(s):
+  return
   pipename = myhome+'/.pychatdbg'
   if not os.path.exists(pipename):
     return
@@ -155,7 +156,7 @@ def keyboard_read_loop():
         if key is not None:
           #only if we get a valid char. Ignore weird escape sequences
           events.put(KeyEvent(key))
-    except select.error as e:
+    except select.error, e:
       pass
 
 def read_key():
@@ -292,7 +293,7 @@ def receive_loop():
   while not quitting:
     try:
       conn,addr = server_sock.accept()
-    except socket.error as e:
+    except socket.error, e:
       time.sleep(.1)
       continue
     for line in conn.makefile():
@@ -317,7 +318,7 @@ def send_to_all(s):
       sock.connect(os.path.join(sockdir,filename))
       sock.send(s)
       sock.close()
-    except socket.error as e:
+    except socket.error, e:
       inform("failed to send message %s to %s: %s" % (s,filename,e))
 
 def send_to_one(user,s):
@@ -330,7 +331,7 @@ def send_to_one(user,s):
     sock.connect(path)
     sock.send(s)
     sock.close()
-  except socket.error as e:
+  except socket.error, e:
     inform("failed to send message %s to %s" % (s,user))
     return False
   return True
