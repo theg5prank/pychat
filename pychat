@@ -228,7 +228,12 @@ def handle_command(cmdstr):
   command = cmdstr[1:cmdstr.index(' ')] if ' ' in cmdstr else cmdstr[1:]
   argstr  = cmdstr[cmdstr.index(' '):].strip() if ' ' in cmdstr else ''
   commands = {
+    'bye'     : do_quit,
+    'exit'    : do_quit,
+    'leave'   : do_quit,
+    'die'     : do_quit,
     'quit'    : do_quit,
+    'pickle'  : do_pickle,
     'me'      : do_action,
     'msg'     : do_msg,
     'm'       : do_msg,
@@ -244,6 +249,9 @@ def do_quit(argstr):
   global quitting
   send_to_all('## %s left the chat (%s).' % (options.name,argstr))
   quitting = True
+
+def do_pickle(argstr):
+  do_quit("Let's pickle!")
 
 def do_action(argstr):
   send_to_all('(*) %s %s' % (options.name,argstr))
@@ -287,6 +295,7 @@ def do_we(argstr):
 def receive_loop():
   server_sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
   server_sock.bind(sockname)
+  os.chmod(sockname,0666)
   server_sock.listen(100)
   server_sock.setblocking(0)
   ready_semaphore.release()
@@ -343,7 +352,9 @@ def main():
   signal.signal(signal.SIGWINCH,winch_handler)
   signal.signal(signal.SIGTERM,term_handler)
   if not os.path.exists(sockdir):
+    # we win the race
     os.mkdir(sockdir)
+    os.chmod(sockdir,01777) #ugo+rwx, sticky
   keyboard_thread = threading.Thread(target=keyboard_read_loop)
   keyboard_thread.start()
   winch_listener_thread = threading.Thread(target=winch_listen_loop)
