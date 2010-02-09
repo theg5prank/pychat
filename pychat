@@ -399,7 +399,7 @@ def do_who(argstr,person=None):
       line += "(idle for unknown time)"
     else:
       if users[user] != 0:
-        line += "(idle for %f minutes)" % users[user]
+        line += "(idle for %f minutes)" % round(users[user],2)
       else:
         line += "(idle for less than a minute)"
     awayfile = os.path.join(sockdir,'.%s.away'%user)
