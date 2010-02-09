@@ -14,6 +14,7 @@ import socket
 import time
 import optparse
 import stat
+import platform
 
 class HistoryQueue(object):
   def __init__(self):
@@ -86,9 +87,12 @@ if len(args) != 0:
 
 
 progname = os.path.basename(sys.argv[0])
-myhome = pwd.getpwuid(posix.getuid())[5]
+myhome   = pwd.getpwuid(posix.getuid()).pw_dir
 sockdir  = '/tmp/.'+options.chattype
 sockname = sockdir + '/'+options.name
+realname = pwd.getpwuid(posix.getuid()).pw_name
+awayfile = os.path.join(sockdir,'.%s.away'%realname)
+
 
 def debug(s):
   return
@@ -122,11 +126,9 @@ history = []
 max_history = 10
 history_index = 0
 
-
 events = Queue.Queue(-1)
 
 VDSUSP = None
-import platform
 if platform.system() == 'Darwin':
   #mac
   VDSUSP = 11
@@ -221,8 +223,13 @@ def event_handle_loop():
         elif s[0] == '/':
           handle_command(s)
         else:
+          if awayp():
+            do_back('')
           send_to_all("<%s> %s" % (options.name,s))
       refresh_input_window()
+    if not os.path.exists(sockname) or \
+        not stat.S_ISSOCK(os.stat(sockname).st_mode):
+      do_quit("NO SOCKET OMG")
   quitting = True
 
 def handle_command(cmdstr):
@@ -242,6 +249,9 @@ def handle_command(cmdstr):
     'we'       : do_we,
     'ghost'    : do_ghost,
     'badghost' : do_badghost,
+    'away'     : do_away,
+    'back'     : do_back,
+    'who'      : do_who,
   }
   if command in commands:
     commands[command](argstr)
@@ -300,6 +310,132 @@ def do_ghost(argstr):
 
 def do_badghost(argstr):
   send_to_all("%s" % argstr)
+
+def awayp():
+  return os.path.exists(awayfile)
+
+def do_away(argstr):
+  try:
+    f = open(awayfile,'w')
+  except IOError as e:
+    inform("## can't mark you as away: %s" % str(e))
+    return
+  os.chmod(awayfile,0644)
+  now = time.strftime("%a %b %e %T %Y")
+  print >> f, "%s\n%s" % (now,argstr),
+  f.close()
+  awaymsg = "## %s is away since %s" % (options.name, now)
+  awaymsg += " -- %s" % argstr if len(argstr) > 0 else ''
+  send_to_all(awaymsg)
+
+def do_back(argstr):
+  now = time.strftime("%a %b %e %T %Y")
+  line = "## %s returned %s" % (options.name,now)
+  if not awayp():
+    inform("You're not marked away!")
+    return
+  if os.access(awayfile,os.R_OK) and argstr=='':
+    try:
+      f = open(awayfile)
+      #burn time line away
+      f.readline()
+      status = f.readline()
+      line += " -- (%s)" % status if len(status) > 0 else ''
+      f.close()
+    except IOError as e:
+      inform("Error marking you back: %s"%str(e))
+      return
+  else:
+    line += " -- %s" % argstr
+  try:
+    os.unlink(awayfile)
+    send_to_all(line)
+  except OSError as e:
+    inform("Error marking you back: %s" % str(e))
+
+def owner(path):
+  try:
+    st_result = os.stat(os.path.join(sockdir,path))
+  except OSError as e:
+    return None
+  return pwd.getpwuid(st_result.st_uid).pw_name
+
+def do_who(argstr,person=None):
+  import subprocess,re,platform
+  w = subprocess.Popen(['/usr/bin/w','-h'],
+                       stdout = subprocess.PIPE,
+                       stdin  = open('/dev/null'),
+                       stderr = open('/dev/null','w'))
+  #BREAK THOSE TABLES
+  linere = re.compile(r"""(?P<user>\S+)\s+(?P<tty>\S+)\s+(?P<from>\S+)\s+(?P<loginat>\S+)\s+(?P<idle>\S+)\s+(?P<what>\S+)\s*""")
+  users = {}
+  for line in w.stdout:
+    match = linere.match(line)
+    if not match:
+      inform('w gave bogus line %s'%line)
+      return
+    idle = text_to_secs(match.group('idle'))
+    user = match.group('user')
+    if user in users:
+      if idle is not None and (users[user] is None or users[user] > idle):
+        users[user] = idle
+    else:
+      users[user] = idle
+  add_to_display("## Current users:")
+  for filename in os.listdir(sockdir):
+    stat_result = os.stat(os.path.join(sockdir,filename))
+    if not stat.S_ISSOCK(stat_result.st_mode):
+      continue
+    user = owner(filename)
+    if user is None:
+      inform("couldn't get stat info for socket %s" % filename)
+      continue
+    line = "##    %s " % filename
+    if user != filename:
+      line+= '(really %s) ' % user
+    if user not in users:
+      line += '(not logged in)'
+    elif user not in users or users[user] is None:
+      line += "(idle for unknown time)"
+    else:
+      if users[user] != 0:
+        line += "(idle for %f minutes)" % users[user]
+      else:
+        line += "(idle for less than a minute)"
+    awayfile = os.path.join(sockdir,'.%s.away'%user)
+    if os.path.exists(awayfile) and os.access(awayfile,os.R_OK):
+      try:
+        f = open(awayfile)
+        time = f.readline()[:-1] #strip newline
+        reason = f.readline()
+        line+= " (away since %s" % time
+        if len(reason) > 0:
+          line+= " -- %s" % reason
+        line +=')'
+      except IOError as e:
+        #meh
+        pass
+    add_to_display(line)
+
+def text_to_secs(text):
+  import re
+  if re.match(r'.*days$',text): #days
+    return int(text.split('d')[0])*24*60
+  if re.match(r'.*m$',text): #hours:mins
+    hours,minutes = map(int,text.split('m')[0].split(':'))
+    return 60 * hours + minutes
+  if re.match(r'^\d+.\d+s$',text): #secs
+    return float(text.split('s')[0]) / 60.0
+  if re.match(r'\d+:\d+',text) : #min:sec
+    minutes,seconds = map(int,text.split(':'))
+    return minutes + seconds / 60.0
+  if re.match(r'^\d+$',text) : #mins
+    return int(text)
+  if re.match(r'^-$',text) : #zero
+    return 0
+  else:
+    inform("Warning: got unknown time format %s"%time)
+    return None
 
 def receive_loop():
   """
