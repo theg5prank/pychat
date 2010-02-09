@@ -164,7 +164,8 @@ def read_key():
   if key==27: #escape
     key = ord(sys.stdin.read(1))
     nextkey = ord(sys.stdin.read(1))
-    if key != 91 or nextkey == -1:
+    if key not in [91,79] or nextkey == -1:
+      #Note: [91,79] is hack hack hacky. Look here first if arrow keys break.
       return None #this sequence is stupid!
     nextkey = chr(nextkey) #let's use symbolic chars
     if nextkey == 'A':
@@ -228,17 +229,19 @@ def handle_command(cmdstr):
   command = cmdstr[1:cmdstr.index(' ')] if ' ' in cmdstr else cmdstr[1:]
   argstr  = cmdstr[cmdstr.index(' '):].strip() if ' ' in cmdstr else ''
   commands = {
-    'bye'     : do_quit,
-    'exit'    : do_quit,
-    'leave'   : do_quit,
-    'die'     : do_quit,
-    'quit'    : do_quit,
-    'pickle'  : do_pickle,
-    'me'      : do_action,
-    'msg'     : do_msg,
-    'm'       : do_msg,
-    'pipe'    : do_pipe,
-    'we'      : do_we,
+    'bye'      : do_quit,
+    'exit'     : do_quit,
+    'leave'    : do_quit,
+    'die'      : do_quit,
+    'quit'     : do_quit,
+    'pickle'   : do_pickle,
+    'me'       : do_action,
+    'msg'      : do_msg,
+    'm'        : do_msg,
+    'pipe'     : do_pipe,
+    'we'       : do_we,
+    'ghost'    : do_ghost,
+    'badghost' : do_badghost,
   }
   if command in commands:
     commands[command](argstr)
@@ -291,13 +294,25 @@ def do_we(argstr):
   msg += 'and ' + people[-1]
   msg += ' '+argstr
   send_to_all(msg)
-  
+
+def do_ghost(argstr):
+  send_to_all('(*) %s' % argstr)
+
+def do_badghost(argstr):
+  send_to_all("%s" % argstr)
+
 def receive_loop():
+  """
+  receive_loop() -> None
+  loop waiting for input from the socket. Actually handles setting up the
+  socket as well.
+  """
   server_sock = socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
   server_sock.bind(sockname)
   os.chmod(sockname,0666)
   server_sock.listen(100)
   server_sock.setblocking(0)
+  #tell main the socket is ready
   ready_semaphore.release()
   while not quitting:
     try:
@@ -316,6 +331,10 @@ def receive_loop():
     os.unlink(sockname)
 
 def send_to_all(s):
+  """
+  send_to_all(s) -> None
+  Attempt to send s to all current hosers. Informs the user of a failure.
+  """
   if s[-1] != '\n':
     s += '\n'
   for filename in os.listdir(sockdir):
@@ -331,6 +350,10 @@ def send_to_all(s):
       inform("failed to send message %s to %s: %s" % (s,filename,e))
 
 def send_to_one(user,s):
+  """
+  send_to_one(user,s) -> bool
+  Attempt to send s to the given user. Returns True on success, False on failure.
+  """
   path = os.path.join(sockdir,user)
   if not (os.path.exists(path) and stat.S_ISSOCK(os.stat(path).st_mode)):
     inform("%s isn't here" % user)
@@ -346,6 +369,12 @@ def send_to_one(user,s):
   return True
 
 def main():
+  """
+  main() -> None
+  
+  Main thread. Start off the threads that read fro mthe keyboard, wait for
+  winches, wait for events and receive input from the socket. Wait to quit.
+  """
   global need_window_regeneration,quitting,options
   import time
   import signal
@@ -377,11 +406,26 @@ def main():
   curses_shutdown()
 
 def add_to_display(s):
-  """add a string to the display window"""
+  """
+  add_to_display(s) -> None
+  
+  Add s to the display window. The window is refreshed. The line is added to
+  the history of lines received.
+  """
   received.record(s)
-  refresh_display_window()
+  maxy,maxx = display_window.getmaxyx()
+  display_window.scroll()
+  display_window.addstr(maxy-1,0,s)
+  display_window.refresh()
 
 def refresh_input_window():
+  """
+  refresh_input_window() -> None
+  
+  Figure out how to best draw the input window based on the current values
+  of point, display_index, and the width of the screen. Update input_window
+  accordingly.
+  """
   global display_index
   if point < display_index:
     #need to move left
@@ -418,6 +462,16 @@ def move_cursor_to_point():
   input_window.move(0,point - display_index)
 
 def handle_key(key):
+  """
+  handle_key(key) -> None or str
+  
+  Handle the key as an edit command. If the key is enter, return
+  that character. Otherwise, update the buffer.
+  Special editing commands:
+  C-d: delete forward
+  C-b: move right
+  C-f: move left
+  """
   global buf,point,mark
   s = None
   if key in [13,10,curses.KEY_ENTER]: #\r,\n,Enter
@@ -496,27 +550,37 @@ def term_handler(signum,frame):
   sys.exit(1)
 
 def generate_windows():
+  """
+  generate_windows() -> None
+  Handle actually generating the windows for the first time.
+  """
   global display_window,input_window,status_bar,screen_width
   maxy,maxx = stdscr.getmaxyx()
   screen_width = maxx
   
-  display_window = stdscr.subwin(maxy-2,maxx,0,0)
+  display_window = curses.newwin(maxy-2,maxx,0,0)
   display_window.idlok(1)
   display_window.scrollok(True)
   display_window.leaveok(1)
   display_window.refresh()
   
-  status_bar = stdscr.subwin(1,maxx,maxy-2,0)
+  status_bar = curses.newwin(1,maxx,maxy-2,0)
   status_bar.attron(curses.A_REVERSE)
   status_bar.hline(0,0,'-',maxx)
   status_bar.refresh()
   
-  input_window   = stdscr.subwin(1,maxx,maxy-1,0)
+  input_window   = curses.newwin(1,maxx,maxy-1,0)
   input_window.nodelay(True)
   input_window.clear()
   input_window.refresh()
 
 def regenerate_windows():
+  """
+  regenerate_windows() -> None
+  
+  Regenerate the window display. This is called when the size of the terminal
+  changes. This actually creates new window objects and draws them.
+  """
   global display_window,input_window,status_bar,screen_width
   import fcntl
   import struct
@@ -527,15 +591,19 @@ def regenerate_windows():
   maxy,maxx = stdscr.getmaxyx()
   screen_width = maxx
   
-  display_window.resize(maxy-2,maxx)
+  display_window = curses.newwin(maxy-2,maxx,0,0)
+  display_window.idlok(1)
+  display_window.scrollok(True)
+  display_window.leaveok(1)
   display_window.refresh()
   
-  status_bar.mvwin(maxy-2,0)
+  status_bar = curses.newwin(1,maxx,maxy-2,0)
+  status_bar.attron(curses.A_REVERSE)
   status_bar.hline(0,0,'-',maxx)
   status_bar.refresh()
   
-  input_window.mvwin(maxy-1,0)
-  input_window.resize(1,maxx)
+  input_window   = curses.newwin(1,maxx,maxy-1,0)
+  input_window.nodelay(True)
   input_window.clear()
   input_window.refresh()
   
@@ -543,6 +611,13 @@ def regenerate_windows():
 
 
 def curses_startup():
+  """
+  curses_startup() -> None
+  
+  Initialize curses. Ignore VDSUSP and VINTR as they are, by default,
+  generated by chords we want to use to edit the input. Generate
+  curses windows.
+  """
   global stdscr,display_window,input_window,input_box,screen_width
   new = termios.tcgetattr(sys.stdin)
   if VDSUSP is not None:
@@ -573,6 +648,7 @@ if __name__ == '__main__':
     main()
   finally:
     termios.tcsetattr(sys.stdin,termios.TCSANOW,old)
+    print >>sys.stderr, "OH NOES"
     curses_shutdown()
     quitting = True
     if os.path.exists(sockname):
