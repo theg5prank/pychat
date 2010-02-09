@@ -75,7 +75,7 @@ parser.add_option('-n','--name',dest="name",type="string",
                   default=pwd.getpwuid(posix.getuid())[0],
                   help="use an alternate name")
 parser.add_option('-c','--chattype',dest="chattype",type="string",
-                  default="electionchat",#os.path.basename(sys.argv[0]),
+                  default=os.path.basename(sys.argv[0]),
                   help="Select chat type (electionchat, hoserchat, etc)")
 parser.add_option('-s','--spartan',dest="spartan",
                   action="store_true",default=False,
