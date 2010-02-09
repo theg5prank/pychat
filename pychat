@@ -317,7 +317,7 @@ def awayp():
 def do_away(argstr):
   try:
     f = open(awayfile,'w')
-  except IOError as e:
+  except IOError, e:
     inform("## can't mark you as away: %s" % str(e))
     return
   os.chmod(awayfile,0644)
@@ -342,7 +342,7 @@ def do_back(argstr):
       status = f.readline()
       line += " -- (%s)" % status if len(status) > 0 else ''
       f.close()
-    except IOError as e:
+    except IOError, e:
       inform("Error marking you back: %s"%str(e))
       return
   else:
@@ -350,13 +350,13 @@ def do_back(argstr):
   try:
     os.unlink(awayfile)
     send_to_all(line)
-  except OSError as e:
+  except OSError, e:
     inform("Error marking you back: %s" % str(e))
 
 def owner(path):
   try:
     st_result = os.stat(os.path.join(sockdir,path))
-  except OSError as e:
+  except OSError, e:
     return None
   return pwd.getpwuid(st_result.st_uid).pw_name
 
@@ -412,7 +412,7 @@ def do_who(argstr,person=None):
         if len(reason) > 0:
           line+= " -- %s" % reason
         line +=')'
-      except IOError as e:
+      except IOError, e:
         #meh
         pass
     add_to_display(line)
