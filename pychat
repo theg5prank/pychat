@@ -15,6 +15,7 @@ import time
 import optparse
 import stat
 import platform
+import subprocess
 
 class HistoryQueue(object):
   def __init__(self):
@@ -58,6 +59,20 @@ class History(object):
     """Burn the library at Alexandria, why don't you"""
     self.items = []
 
+def protect(err=None,fin=None):
+  def wrap(f):
+    def wrapped_f(*args,**kwargs):
+      try:
+        return f(*args,**kwargs)
+      except BaseException, e:
+        if err is not None:
+          return err(e)
+      finally:
+        if fin is not None:
+          fin()
+    return wrapped_f
+  return wrap
+
 class KeyEvent(object):
   def __init__(self,ch):
     assert type(ch) is int
@@ -69,6 +84,11 @@ class WinchEvent(object):
 class RecvEvent(object):
   def __init__(self,s):
     self.s = s
+
+class InternalErrorEvent(object):
+  def __init__(self,public,private):
+    self.public  = public
+    self.private = private
 
 parser = optparse.OptionParser()
 parser.add_option('-n','--name',dest="name",type="string",
@@ -92,7 +112,6 @@ sockdir  = '/tmp/.'+options.chattype
 sockname = sockdir + '/'+options.name
 realname = pwd.getpwuid(posix.getuid()).pw_name
 awayfile = os.path.join(sockdir,'.%s.away'%realname)
-
 
 def debug(s):
   return
@@ -147,9 +166,20 @@ quitting = False
 
 ready_semaphore = threading.Semaphore(0)
 
+error_msg = None
+
+def record_err_and_quit(e):
+  import traceback
+  global error_msg,quitting
+  err = "Thread %s raised an unhandled exception.\n" % threading.currentThread().name
+  err += traceback.format_exc()
+  error_msg = err
+  quitting = True
+
 def inform(s):
   add_to_display('pychat: %s' % s)
 
+@protect(err=record_err_and_quit)
 def keyboard_read_loop():
   while not quitting:
     try:
@@ -192,6 +222,7 @@ def read_key():
       return None # man, screw this character
   return key
 
+@protect(err=record_err_and_quit)
 def winch_listen_loop():
   """Can't put the event in the queue from the signal handler, 
 unfortunately, so this is a kludge"""
@@ -203,6 +234,7 @@ unfortunately, so this is a kludge"""
       events.put(WinchEvent())
       need_window_regeneration = False
 
+@protect(err=record_err_and_quit)
 def event_handle_loop():
   global quitting
   s = None
@@ -227,15 +259,28 @@ def event_handle_loop():
             do_back('')
           send_to_all("<%s> %s" % (options.name,s))
       refresh_input_window()
-    if not os.path.exists(sockname) or \
-        not stat.S_ISSOCK(os.stat(sockname).st_mode):
-      do_quit("NO SOCKET OMG")
+    if isinstance(e,InternalErrorEvent):
+      global error_msg
+      do_quit(e.public)
+      error_msg = e.private
+      quitting = True
   quitting = True
 
 def handle_command(cmdstr):
   command = cmdstr[1:cmdstr.index(' ')] if ' ' in cmdstr else cmdstr[1:]
   argstr  = cmdstr[cmdstr.index(' '):].strip() if ' ' in cmdstr else ''
+  def do_help(argstr):
+    """
+    defined here so it has access to commands
+    """
+    inform("Available commands:")
+    s = ""
+    for command in  sorted(commands.keys()):
+      s+=' '+command
+    inform(s)
   commands = {
+    'help'     : do_help,
+    'refresh'  : do_refresh,
     'bye'      : do_quit,
     'exit'     : do_quit,
     'leave'    : do_quit,
@@ -252,11 +297,17 @@ def handle_command(cmdstr):
     'away'     : do_away,
     'back'     : do_back,
     'who'      : do_who,
+    'whois'    : do_whois,
+    'invite'   : do_invite,
   }
   if command in commands:
     commands[command](argstr)
   else:
     inform('Unknown command "%s"' % command)
+
+def do_refresh(argstr):
+  global need_window_regeneration
+  need_window_regeneration=True
 
 def do_quit(argstr):
   global quitting
@@ -287,8 +338,15 @@ def do_msg(argstr):
 
 def do_pipe(argstr):
   import subprocess
-  pipeline = subprocess.Popen(argstr,shell=True,stdout=subprocess.PIPE)
+  pipeline = subprocess.Popen(argstr,
+                              shell=True,
+                              stdin=open('/dev/null'),
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+  send_to_all('<%s> $ %s'%(options.name,argstr))
   for line in pipeline.stdout:
+    send_to_all('<%s> %s'%(options.name,line))
+  for line in pipeline.stderr:
     send_to_all('<%s> %s'%(options.name,line))
 
 def do_we(argstr):
@@ -353,71 +411,7 @@ def do_back(argstr):
   except OSError, e:
     inform("Error marking you back: %s" % str(e))
 
-def owner(path):
-  try:
-    st_result = os.stat(os.path.join(sockdir,path))
-  except OSError, e:
-    return None
-  return pwd.getpwuid(st_result.st_uid).pw_name
-
-def do_who(argstr,person=None):
-  import subprocess,re,platform
-  w = subprocess.Popen(['/usr/bin/w','-h'],
-                       stdout = subprocess.PIPE,
-                       stdin  = open('/dev/null'),
-                       stderr = open('/dev/null','w'))
-  #BREAK THOSE TABLES
-  linere = re.compile(r"""(?P<user>\S+)\s+(?P<tty>\S+)\s+(?P<from>\S+)\s+(?P<loginat>\S+)\s+(?P<idle>\S+)\s+(?P<what>\S+)\s*""")
-  users = {}
-  for line in w.stdout:
-    match = linere.match(line)
-    if not match:
-      inform('w gave bogus line %s'%line)
-      return
-    idle = text_to_secs(match.group('idle'))
-    user = match.group('user')
-    if user in users:
-      if idle is not None and (users[user] is None or users[user] > idle):
-        users[user] = idle
-    else:
-      users[user] = idle
-  add_to_display("## Current users:")
-  for filename in os.listdir(sockdir):
-    stat_result = os.stat(os.path.join(sockdir,filename))
-    if not stat.S_ISSOCK(stat_result.st_mode):
-      continue
-    user = owner(filename)
-    if user is None:
-      inform("couldn't get stat info for socket %s" % filename)
-      continue
-    line = "##    %s " % filename
-    if user != filename:
-      line+= '(really %s) ' % user
-    if user not in users:
-      line += '(not logged in)'
-    elif user not in users or users[user] is None:
-      line += "(idle for unknown time)"
-    else:
-      if users[user] != 0:
-        line += "(idle for %.1f minutes)" % round(users[user],2)
-      else:
-        line += "(idle for less than a minute)"
-    awayfile = os.path.join(sockdir,'.%s.away'%user)
-    if os.path.exists(awayfile) and os.access(awayfile,os.R_OK):
-      try:
-        f = open(awayfile)
-        time = f.readline()[:-1] #strip newline
-        reason = f.readline()
-        line+= " (away since %s" % time
-        if len(reason) > 0:
-          line+= " -- %s" % reason
-        line +=')'
-      except IOError, e:
-        #meh
-        pass
-    add_to_display(line)
-
-def text_to_secs(text):
+def text_to_mins(text):
   import re
   if re.match(r'.*days$',text): #days
     return int(text.split('d')[0])*24*60
@@ -437,6 +431,111 @@ def text_to_secs(text):
     inform("Warning: got unknown time format %s"%time)
     return None
 
+def owner(path):
+  try:
+    st_result = os.stat(path)
+  except OSError, e:
+    return None
+  return pwd.getpwuid(st_result.st_uid).pw_name
+
+def idle_info():
+  import subprocess,re
+  w = subprocess.Popen(['/usr/bin/w','-h'],
+                       stdout = subprocess.PIPE,
+                       stdin  = open('/dev/null'),
+                       stderr = open('/dev/null','w'))
+  #BREAK THOSE TABLES
+  linere = re.compile(r"""(?P<user>\S+)\s+(?P<tty>\S+)\s+(?P<from>\S+)\s+(?P<loginat>\S+)\s+(?P<idle>\S+)\s+(?P<what>\S+)\s*""")
+  users = {}
+  for line in w.stdout:
+    match = linere.match(line)
+    if not match:
+      inform('w gave bogus line %s'%line)
+      return
+    idle = text_to_mins(match.group('idle'))
+    user = match.group('user')
+    if user in users:
+      if idle is not None and (users[user] is None or users[user] > idle):
+        users[user] = idle
+    else:
+      users[user] = idle
+  return users
+
+def whois_line(sockname,users):
+  sockpath = os.path.join(sockdir,sockname)
+  assert stat.S_ISSOCK(os.stat(sockpath).st_mode)
+  user = owner(sockpath)
+  if user is None:
+    inform("couldn't get stat info for socket %s" % sockname)
+    return None
+  line = "##    %s " % sockname
+  if user != sockname:
+    line+= '(really %s) ' % user
+  if user not in users:
+    line += '(not logged in)'
+  elif user not in users or users[user] is None:
+    line += "(idle for unknown time)"
+  else:
+    if users[user] != 0:
+      line += "(idle for %.1f minutes)" % round(users[user],2)
+    else:
+      line += "(idle for less than a minute)"
+  awayfile = os.path.join(sockdir,'.%s.away'%user)
+  if os.path.exists(awayfile) and os.access(awayfile,os.R_OK):
+    try:
+      f = open(awayfile)
+      time = f.readline()[:-1] #strip newline
+      reason = f.readline()
+      line+= " (away since %s" % time
+      if len(reason) > 0:
+        line+= " -- %s" % reason
+      line +=')'
+    except IOError, e:
+      #meh
+      pass
+  return line
+
+def do_who(argstr):
+  users = idle_info()
+  add_to_display("## Current users:")
+  for filename in os.listdir(sockdir):
+    stat_result = os.stat(os.path.join(sockdir,filename))
+    if not stat.S_ISSOCK(stat_result.st_mode):
+      continue
+    line = whois_line(filename,users)
+    if line is None:
+      continue
+    add_to_display(line)
+
+def do_whois(argstr):
+  users = idle_info()
+  for user in argstr.split():
+    sockpath = os.path.join(sockdir,user)
+    if not os.path.exists(sockpath) or\
+        not stat.S_ISSOCK(os.stat(sockpath).st_mode):
+      inform("%s is not online." % user)
+      continue
+    line = whois_line(user,users)
+    if line is None:
+      inform("Unable to get whois data on %s" % user)
+      continue
+    else:
+      add_to_display(line)
+
+def do_invite(argstr):
+  people = argstr.split()
+  inform('Inviting '+', '.join(people)+' to chat')
+  for person in people:
+    write = subprocess.Popen(["/usr/bin/write",person],
+                             stdin=subprocess.PIPE,
+                             stdout=open('/dev/null','w'),
+                             stderr=open('/dev/null','w'))
+    print >> write.stdin, "I'm inviting you to %s." % options.chattype
+    write.stdin.close()
+    if write.wait()!=0:
+      inform("Inviting %s failed (are they logged in?)" % person)
+
+@protect(err=record_err_and_quit)
 def receive_loop():
   """
   receive_loop() -> None
@@ -520,20 +619,30 @@ def main():
     # we win the race
     os.mkdir(sockdir)
     os.chmod(sockdir,01777) #ugo+rwx, sticky
-  keyboard_thread = threading.Thread(target=keyboard_read_loop)
+  keyboard_thread = threading.Thread(target=keyboard_read_loop,
+                                     name="keyboard_thread")
   keyboard_thread.start()
-  winch_listener_thread = threading.Thread(target=winch_listen_loop)
+  winch_listener_thread = threading.Thread(target=winch_listen_loop,
+                                           name="winch_listener_thread")
   winch_listener_thread.start()
-  event_handling_thread = threading.Thread(target=event_handle_loop)
+  event_handling_thread = threading.Thread(target=event_handle_loop,
+                                           name="event_handling_thread")
   event_handling_thread.start()
-  receiver_thread = threading.Thread(target=receive_loop)
+  receiver_thread = threading.Thread(target=receive_loop,
+                                     name="receiver_thread")
   receiver_thread.start()
   #wait for receiver thread to create our socket so we see the following output
   ready_semaphore.acquire()
   inform('joining %s as "%s"' % (options.chattype,options.name))
   send_to_all('## %s joined the chat.' % options.name)
   while not quitting:
-    time.sleep(.1)
+    if not os.path.exists(sockname) or \
+        not stat.S_ISSOCK(os.stat(sockname).st_mode):
+      events.put(InternalErrorEvent(public="Socket died!",
+              private="Failure: won't proceed without socket %s" % sockname))
+      #will quit once the InternalErrorEvent is processed and the threads exit
+      break
+    time.sleep(.2)
   keyboard_thread.join()
   winch_listener_thread.join()
   event_handling_thread.join()
@@ -682,7 +791,9 @@ def winch_handler(signum,frame):
   need_window_regeneration = True
 
 def term_handler(signum,frame):
+  global error_msg
   send_to_all('## %s left the chat (caught SIGTERM).' % options.name)
+  error_msg = "Caught SIGTERM."
   sys.exit(1)
 
 def generate_windows():
@@ -774,6 +885,9 @@ def curses_shutdown():
   curses.endwin()
 
 if __name__ == '__main__':
+  if not os.isatty(sys.stdin.fileno()):
+    print >> sys.stderr, "Can't start pychat: stdin not tty"
+    sys.exit(1)
   if os.path.exists(sockname):
     print >> sys.stderr, "Can't start pychat: socket %s exists" % sockname
     print >> sys.stderr, "(You probably have pychat or hoserchat running; kill them)"
@@ -784,8 +898,12 @@ if __name__ == '__main__':
     main()
   finally:
     termios.tcsetattr(sys.stdin,termios.TCSANOW,old)
-    print >>sys.stderr, "OH NOES"
     curses_shutdown()
     quitting = True
     if os.path.exists(sockname):
       os.unlink(sockname)
+    if os.path.exists(awayfile):
+      os.unlink(awayfile)
+    if error_msg is not None:
+      print >> sys.stderr, error_msg
+      sys.exit(1)
