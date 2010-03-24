@@ -77,18 +77,41 @@ class KeyEvent(object):
   def __init__(self,ch):
     assert type(ch) is int
     self.ch = ch
+  def handle(self):
+    s = handle_key(self.ch)
+    if s is not None:
+      if len(s) == 0:
+        inform("Gimme something to work with here!")
+      elif s[0] == '/':
+        handle_command(s)
+      else:
+        if awayp():
+          do_back('')
+        send_to_all("<%s> %s" % (options.name,s))
+    refresh_input_window()
 
 class WinchEvent(object):
-  pass
+  def handle(self):
+    regenerate_windows()
+    refresh_input_window()
 
 class RecvEvent(object):
   def __init__(self,s):
     self.s = s
+  def handle(self):
+    add_to_display(self.s)
+    move_cursor_to_point()
+    input_window.refresh()
 
 class InternalErrorEvent(object):
   def __init__(self,public,private):
     self.public  = public
     self.private = private
+  def handle(self):
+    global error_msg
+    do_quit(self.public)
+    error_msg = self.private
+    quitting = True
 
 parser = optparse.OptionParser()
 parser.add_option('-n','--name',dest="name",type="string",
@@ -240,30 +263,7 @@ def event_handle_loop():
   s = None
   while not quitting:
     e = events.get()
-    if isinstance(e,WinchEvent):
-      regenerate_windows()
-      refresh_input_window()
-    if isinstance(e,RecvEvent):
-      add_to_display(e.s)
-      move_cursor_to_point()
-      input_window.refresh()
-    if isinstance(e,KeyEvent):
-      s = handle_key(e.ch)
-      if s is not None:
-        if len(s) == 0:
-          inform("Gimme something to work with here!")
-        elif s[0] == '/':
-          handle_command(s)
-        else:
-          if awayp():
-            do_back('')
-          send_to_all("<%s> %s" % (options.name,s))
-      refresh_input_window()
-    if isinstance(e,InternalErrorEvent):
-      global error_msg
-      do_quit(e.public)
-      error_msg = e.private
-      quitting = True
+    e.handle()
   quitting = True
 
 def handle_command(cmdstr):
@@ -814,6 +814,12 @@ def generate_windows():
   status_bar = curses.newwin(1,maxx,maxy-2,0)
   status_bar.attron(curses.A_REVERSE)
   status_bar.hline(0,0,'-',maxx)
+  #display as much of a name as will fit. Probably an edge case nobody will
+  #ever encounter, but hey.
+  name_str = "<%s>" % options.name
+  if len(name_str) >= maxx:
+    name_str = name_str[:maxx-1]
+  status_bar.addstr(0,0,name_str)
   status_bar.refresh()
   
   input_window   = curses.newwin(1,maxx,maxy-1,0)
@@ -847,6 +853,12 @@ def regenerate_windows():
   status_bar = curses.newwin(1,maxx,maxy-2,0)
   status_bar.attron(curses.A_REVERSE)
   status_bar.hline(0,0,'-',maxx)
+  #display as much of a name as will fit. Probably an edge case nobody will
+  #ever encounter, but hey.
+  name_str = "<%s>" % options.name
+  if len(name_str) >= maxx:
+    name_str = name_str[:maxx-1]
+  status_bar.addstr(0,0,name_str)
   status_bar.refresh()
   
   input_window   = curses.newwin(1,maxx,maxy-1,0)
