@@ -634,8 +634,9 @@ def main():
   global need_window_regeneration,quitting,options
   import time
   import signal
-  signal.signal(signal.SIGWINCH,winch_handler)
-  signal.signal(signal.SIGTERM,term_handler)
+  signal.signal(signal.SIGWINCH, winch_handler)
+  signal.signal(signal.SIGTERM, term_handler)
+  signal.signal(signal.SIGHUP, hup_handler)
   if not os.path.exists(sockdir):
     # we win the race
     os.mkdir(sockdir)
@@ -833,6 +834,12 @@ def term_handler(signum,frame):
   global error_msg
   send_to_all('## %s left the chat (caught SIGTERM).' % options.name)
   error_msg = "Caught SIGTERM."
+  sys.exit(1)
+
+def hup_handler(signum, frame):
+  global error_msg
+  send_to_all('## %s left the chat (caught SIGHUP).' % options.name)
+  error_msg = "Caught SIGHUP."
   sys.exit(1)
 
 def generate_windows():
