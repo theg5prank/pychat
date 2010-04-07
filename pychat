@@ -53,22 +53,18 @@ class History(object):
     if len(self.items) > self.limit:
       self.items = self.items[1:]
   def __iter__(self):
-    """go back in time"""
     for item in self.items:
       yield item
   def reversed(self):
-    """per request by one bejnamin button"""
     for item in reversed(self.items):
       yield item
   def __getitem__(self,idx):
-    """energize the flux capacitor"""
     return self.items[idx]
   def __len__(self):
     return len(self.items)
   def __getslice__(self,i,j):
     return self.items[i:j]
   def clear(self):
-    """Burn the library at Alexandria, why don't you"""
     self.items = []
 
 def protect(err=None,fin=None):
