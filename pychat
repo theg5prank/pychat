@@ -48,10 +48,6 @@ class History(object):
     if iterator is not None:
       for val in iterator:
         self.record(val)
-  def record(self,obj):
-    self.items.append(obj)
-    if len(self.items) > self.limit:
-      self.items = self.items[1:]
   def __iter__(self):
     for item in self.items:
       yield item
@@ -66,6 +62,18 @@ class History(object):
     return self.items[i:j]
   def clear(self):
     self.items = []
+
+class ReceivedHistory(History):
+  def record(self,obj):
+    self.items.append(obj)
+    if len(self.items) > self.limit:
+      self.items = self.items[1:]
+
+class CommandHistory(History):
+  def record(self,obj):
+    self.items.insert(0,obj)
+    if len(self.items) > self.limit:
+      self.items = self.items[:-1]
 
 def protect(err=None,fin=None):
   def wrap(f):
@@ -170,11 +178,11 @@ mark          = None
 kill_ring     = Stack()
 display_index = 0
 
-received = History(1000)
+received = ReceivedHistory(1000)
 
-history = []
-max_history = 10
-history_index = 0
+command_history = CommandHistory(100)
+command_history_index = -1 # means not in the history
+saved_buf = "" # save buf while we scroll our history
 
 events = Queue.Queue(-1)
 
@@ -726,12 +734,16 @@ def handle_key(key):
   C-b: move right
   C-f: move left
   """
-  global buf,point,mark
+  global buf,point,mark,command_history_index,saved_buf
   s = None
   if key in [13,10,curses.KEY_ENTER]: #\r,\n,Enter
     s = buf
     buf = ""
     point = mark = 0
+    #ignore dups in history
+    if (len(command_history) == 0 or s != command_history[0]) and len(s) > 0:
+      command_history.record(s)
+    command_history_index = -1
   elif key in [0x08,0x7F,curses.KEY_BACKSPACE]: # ^H, delete, backspace
     if point > 0:
       point-=1
@@ -780,9 +792,23 @@ def handle_key(key):
     kill_ring.push(buf[point:])
     buf = buf[:point]
   elif key in [ord(curses.ascii.ctrl('p')),curses.KEY_UP]: # prev line
-    curses.beep()
+    if command_history_index + 1 >= len(command_history):
+      curses.beep()
+    else:
+      if command_history_index == -1:
+        saved_buf = buf
+      command_history_index += 1
+      buf = command_history[command_history_index]
+      mark = 0
+      point = len(buf)
   elif key in [ord(curses.ascii.ctrl('n')),curses.KEY_DOWN]: # next line
-    curses.beep()
+    if command_history_index < 0:
+      curses.beep()
+    else:
+      command_history_index -= 1
+      buf = command_history[command_history_index] if command_history_index >=0 else saved_buf
+      mark = 0
+      point = len(buf)
   elif key in [ord(curses.ascii.ctrl('a')),curses.KEY_HOME,curses.KEY_FIND]:
     point = 0
   elif key in [ord(curses.ascii.ctrl('e')),curses.KEY_END]:
