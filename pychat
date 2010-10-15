@@ -291,7 +291,7 @@ def handle_command(cmdstr):
     """
     inform("Available commands:")
     s = ""
-    for command in  sorted(commands.keys()):
+    for command in  sorted([key for key in commands.keys() if key != "xyzzy"]):
       s+=' '+command
     inform(s)
   commands = {
@@ -316,11 +316,15 @@ def handle_command(cmdstr):
     'who'      : do_who,
     'whois'    : do_whois,
     'invite'   : do_invite,
+    'xyzzy'    : do_xyzzy,
   }
   if command in commands:
     commands[command](argstr)
   else:
     inform('Unknown command "%s"' % command)
+
+def do_xyzzy(argstr):
+  inform("Nothing happens.")
 
 def do_refresh(argstr):
   global need_window_regeneration
