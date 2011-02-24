@@ -97,7 +97,7 @@ class KeyEvent(object):
     s = handle_key(self.ch)
     if s is not None:
       if len(s) == 0:
-        inform("Gimme something to work with here!")
+        pass
       elif s[0] == '/':
         handle_command(s)
       else:
